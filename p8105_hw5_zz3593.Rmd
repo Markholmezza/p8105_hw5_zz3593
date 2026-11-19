@@ -71,3 +71,86 @@ bday_results |>
 
 The probability of a shared birthday rises quickly with group size and follows an S-shaped curve. With `r min(bday_results$group_size)` people it is only about `r round(bday_results$prob_shared[1] * 100, 1)`%, but it first exceeds 50% at a group size of `r first_over_half`, and by `r max(bday_results$group_size)` people it reaches about `r round(max(bday_results$prob_shared) * 100, 1)`%. This is much faster than most people expect, because the number of possible pairs grows quadratically with group size: `r first_over_half` people already form `r choose(first_over_half, 2)` pairs. The simulated estimates sit almost exactly on the exact curve, so 10,000 runs per group size are enough to estimate these probabilities well. In real life birthdays are not uniform across the year, which only makes a shared birthday slightly more likely than these results suggest.
 
+# Problem 2
+
+The longitudinal study data has one CSV file per participant, and each file name gives the study arm (`con` or `exp`) and the subject ID. I start with a dataframe of all file names from `list.files`, then use `purrr::map` to read each subject's data into a list column.
+
+```{r p2_import}
+study_df =
+  tibble(file_name = list.files("data", pattern = "\\.csv$")) |>
+  mutate(
+    data = map(file.path("data", file_name), \(path) read_csv(path, show_col_types = FALSE))
+  )
+```
+
+To tidy the result, I pull the arm and subject ID out of the file name, unnest the subject data, and pivot the eight weekly columns into one row per subject per week. Subject IDs restart at 01 in each arm, so I also make a `subject` variable that is unique across arms.
+
+```{r p2_tidy}
+study_tidy =
+  study_df |>
+  mutate(file_name = str_remove(file_name, "\\.csv$")) |>
+  separate(file_name, into = c("arm", "subject_id"), sep = "_", remove = FALSE) |>
+  rename(subject = file_name) |>
+  unnest(data) |>
+  pivot_longer(
+    week_1:week_8,
+    names_to = "week",
+    names_prefix = "week_",
+    names_transform = as.integer,
+    values_to = "observation"
+  ) |>
+  mutate(
+    arm = factor(arm, levels = c("con", "exp"), labels = c("Control", "Experimental"))
+  ) |>
+  select(subject, arm, subject_id, week, observation)
+
+study_tidy
+```
+
+The tidy dataset has `r nrow(study_tidy)` rows, one for each of `r n_distinct(study_tidy$subject)` subjects (`r sum(study_tidy$arm == "Control") / 8` per arm) in each of `r n_distinct(study_tidy$week)` weeks.
+
+```{r p2_spaghetti}
+arm_means =
+  study_tidy |>
+  group_by(arm, week) |>
+  summarize(mean_obs = mean(observation), .groups = "drop")
+
+study_tidy |>
+  ggplot(aes(x = week, y = observation, color = arm)) +
+  geom_line(aes(group = subject), alpha = 0.4) +
+  geom_line(data = arm_means, aes(y = mean_obs), linewidth = 1.3) +
+  scale_x_continuous(breaks = 1:8) +
+  scale_color_manual(values = c("Control" = "steelblue", "Experimental" = "darkorange")) +
+  labs(
+    title = "Weekly observations for each subject, by study arm",
+    subtitle = "Thin lines: individual subjects; thick lines: arm means",
+    x = "Week",
+    y = "Observation",
+    color = "Arm"
+  )
+```
+
+```{r p2_arm_summary}
+arm_means |>
+  filter(week %in% c(1, 8)) |>
+  pivot_wider(names_from = week, names_prefix = "week_", values_from = mean_obs) |>
+  mutate(change = week_8 - week_1) |>
+  knitr::kable(
+    digits = 2,
+    col.names = c("Arm", "Mean at week 1", "Mean at week 8", "Change")
+  )
+
+arm_week1 = arm_means |> filter(week == 1) |> pull(mean_obs, name = arm)
+arm_week8 = arm_means |> filter(week == 8) |> pull(mean_obs, name = arm)
+
+week8_range =
+  study_tidy |>
+  filter(week == 8) |>
+  group_by(arm) |>
+  summarize(min_obs = min(observation), max_obs = max(observation))
+
+exp_week8_min = week8_range |> filter(arm == "Experimental") |> pull(min_obs)
+con_week8_max = week8_range |> filter(arm == "Control") |> pull(max_obs)
+```
+
+The two arms start at similar values: at week 1 the mean observation is `r round(arm_week1["Control"], 2)` in the control arm and `r round(arm_week1["Experimental"], 2)` in the experimental arm, and the individual trajectories overlap a lot. Over the eight weeks, subjects in the experimental arm show a steady upward trend, while control subjects fluctuate around a roughly constant level with no clear trend. By week 8 the experimental mean has risen to `r round(arm_week8["Experimental"], 2)`, compared with `r round(arm_week8["Control"], 2)` for the control arm. At week 8 the arms no longer overlap at all: the lowest experimental subject (`r exp_week8_min`) is above the highest control subject (`r con_week8_max`). Within each arm there is a lot of week-to-week variability for individual subjects, but the difference between the arms grows over time, which suggests the experimental condition increases the outcome.
